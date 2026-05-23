@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Kani's Health Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0a0a0f;--surface:#13131a;--surface2:#1c1c26;--border:#2a2a38;--accent:#7c6aff;--accent2:#ff6a6a;--accent3:#6affb8;--gold:#ffd166;--text:#f0f0f8;--muted:#6b6b80;--green:#4ade80;--red:#f87171}
+body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min-height:100vh;overflow-x:hidden}
+#root{min-height:100vh}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:var(--surface)}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+@keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pop{0%{transform:scale(1)}50%{transform:scale(1.18)}100%{transform:scale(1)}}
+.fade-up{animation:fadeUp .4s ease both}
+input[type=text],input[type=password]{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:12px;padding:12px 16px;font-family:'DM Sans';font-size:14px;width:100%;outline:none;transition:border .2s}
+input:focus{border-color:var(--accent)}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback}=React;
+
+/* ─── SUPABASE CONFIG ─── */
+const SB_URL='https://rthdcospfqypaphculap.supabase.co';
+const SB_KEY='sb_publishable_lLQddRTMp9pllYn5WqDgXQ_kjKZmGkM';
+let sb=null;
+try{sb=window.supabase.createClient(SB_URL,SB_KEY)}catch(e){console.warn('Supabase not available, using localStorage only')}
+
+/* ─── CONSTANTS ─── */
+const STORAGE_KEY='kani_health_v3';
+const ADMIN_CREDS={user:'kaniy',pass:'kaniy'};
+const TODAY_KEY=()=>new Date().toISOString().split('T')[0];
+
+const JUICE_MAP=['Carrot + Beetroot + Ginger','Spinach + Apple + Lemon','Cucumber + Mint + Lemon','Tomato + Carrot + Celery','Orange + Pomegranate','Amla + Ginger + Honey','Watermelon + Mint'];
+const JUICE_DAY=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+const MEALS=[
+  {id:'breakfast',time:'7:30 AM',label:'Breakfast',icon:'🍳',items:['2 idlis + sambar','OR Dosa + chutney'],kcal:300,protein:8},
+  {id:'snack1',time:'9:30 AM',label:'Morning Snack',icon:'🍞',items:['Bread + peanut butter'],kcal:400,protein:14},
+  {id:'lunch',time:'12:30 PM',label:'Lunch',icon:'🍛',items:['2 eggs','Rice + dal / curd'],kcal:500,protein:22},
+  {id:'juice',time:'4:00 PM',label:'Juice',icon:'🥤',items:[JUICE_MAP[new Date().getDay()]],kcal:100,protein:2},
+  {id:'peanuts',time:'5:00 PM',label:'Peanuts',icon:'🥜',items:['30-40g roasted peanuts'],kcal:170,protein:8},
+  {id:'pregym',time:'5:30 PM',label:'Pre-Gym',icon:'🍌',items:['1 banana','4 dates'],kcal:200,protein:2},
+  {id:'postgym',time:'7:00 PM',label:'Post-Gym',icon:'🥚',items:['2 eggs','1 banana','1 glass milk'],kcal:380,protein:24},
+  {id:'dinner',time:'7:30 PM',label:'Dinner',icon:'🌙',items:['Chapati','Curd-rice'],kcal:400,protein:10},
+  {id:'milk',time:'8:30 PM',label:'Bedtime Milk',icon:'🥛',items:['1 glass milk'],kcal:150,protein:8},
+];
+
+const SUPPLEMENTS=[
+  {id:'vitd',label:'Vitamin D3',sub:'Calcirol 60,000 IU — every Sunday only',icon:'☀️',weekly:true,color:'#ffd166'},
+  {id:'b12',label:'Vitamin B12',sub:'Methylcobalamin 1500 mcg — daily',icon:'⚡',weekly:false,color:'#6affb8'},
+];
+
+const HABITS=[
+  {id:'gym',label:'Evening Gym',sub:'6–7 PM session',icon:'🏋️',color:'#7c6aff'},
+  {id:'water',label:'Water intake',sub:'8+ glasses today',icon:'💧',color:'#60a5fa'},
+  {id:'facewash',label:'Face wash',sub:'Cold water — morning & after office',icon:'🫧',color:'#a78bfa'},
+  {id:'walk',label:'2km walk',sub:'Office commute counts',icon:'🚶',color:'#4ade80'},
+  {id:'sleep',label:'Sleep by 11pm',sub:'Recovery is muscle growth',icon:'😴',color:'#f472b6'},
+];
+
+const TARGET_KCAL=2600,TARGET_PROTEIN=98;
+
+/* ─── LOCAL STORAGE ─── */
+function loadLocal(username){
+  try{const d=JSON.parse(localStorage.getItem(STORAGE_KEY+'_'+username));return d||{}}catch{return{}}
+}
+function saveLocal(username,data){
+  try{localStorage.setItem(STORAGE_KEY+'_'+username,JSON.stringify(data))}catch{}
+}
+
+/* ─── SUPABASE SYNC ─── */
+async function sbSave(username,date,dayData){
+  if(!sb)return;
+  try{await sb.from('tracker_data').upsert({username,date,data:dayData},{onConflict:'username,date'})}catch(e){console.warn('Supabase save error:',e)}
+}
+async function sbLoadAll(username){
+  if(!sb)return null;
+  try{const{data}=await sb.from('tracker_data').select('*').eq('username',username).order('date',{ascending:false});
+    if(!data||data.length===0)return null;
+    const result={};data.forEach(r=>{result[r.date]=r.data});return result;
+  }catch{return null}
+}
+async function sbGetAllUsers(){
+  if(!sb)return[];
+  try{const{data}=await sb.from('tracker_data').select('username');
+    return[...new Set((data||[]).map(r=>r.username))];
+  }catch{return[]}
+}
+async function sbGetUserData(username){
+  if(!sb)return[];
+  try{const{data}=await sb.from('tracker_data').select('*').eq('username',username).order('date',{ascending:false});
+    return data||[];
+  }catch{return[]}
+}
+
+function getStreak(data,key){
+  let streak=0;const today=new Date();
+  for(let i=0;i<60;i++){const d=new Date(today);d.setDate(today.getDate()-i);
+    const dk=d.toISOString().split('T')[0];
+    if(data[dk]?.[key])streak++;else break;
+  }return streak;
+}
+function getDaysToSunday(){const d=new Date().getDay();return d===0?0:7-d}
+function calcKcal(dayData){return MEALS.reduce((a,m)=>dayData['meal_'+m.id]?a+m.kcal:a,0)}
+function calcProtein(dayData){return MEALS.reduce((a,m)=>dayData['meal_'+m.id]?a+m.protein:a,0)}
+function calcPct(dayData){
+  const total=MEALS.length+SUPPLEMENTS.length+HABITS.length;
+  const done=MEALS.filter(m=>dayData['meal_'+m.id]).length+SUPPLEMENTS.filter(s=>dayData['supp_'+s.id]).length+HABITS.filter(h=>dayData['hab_'+h.id]).length;
+  return Math.round(done/total*100);
+}
+
+/* ─── COMPONENTS ─── */
+function CheckBox({checked,onChange,color='#7c6aff'}){
+  return(<button onClick={onChange} style={{width:28,height:28,borderRadius:8,border:`2px solid ${checked?color:'#2a2a38'}`,background:checked?color:'transparent',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',transition:'all .2s',flexShrink:0,animation:checked?'pop .3s ease':undefined}}>
+    {checked&&<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>}
+  </button>);
+}
+function TabBtn({active,onClick,children}){
+  return(<button onClick={onClick} style={{padding:'8px 14px',borderRadius:20,border:'none',cursor:'pointer',fontFamily:'DM Sans',fontSize:12,fontWeight:500,transition:'all .2s',background:active?'var(--accent)':'transparent',color:active?'#fff':'var(--muted)'}}>{children}</button>);
+}
+function MealCard({meal,checked,onToggle}){
+  const[open,setOpen]=useState(false);
+  return(<div style={{background:checked?'rgba(124,106,255,0.08)':'var(--surface)',border:`1px solid ${checked?'rgba(124,106,255,0.3)':'var(--border)'}`,borderRadius:16,overflow:'hidden',transition:'all .3s',animation:'fadeUp .3s ease both'}}>
+    <div style={{display:'flex',alignItems:'center',gap:12,padding:'14px 16px',cursor:'pointer'}} onClick={()=>setOpen(o=>!o)}>
+      <div style={{width:40,height:40,borderRadius:12,background:checked?'rgba(124,106,255,0.2)':'var(--surface2)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18,flexShrink:0}}>{meal.icon}</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontFamily:'Syne',fontWeight:700,fontSize:14,color:checked?'var(--accent)':'var(--text)'}}>{meal.label}</span>
+          <span style={{fontSize:11,color:'var(--muted)',background:'var(--surface2)',padding:'2px 7px',borderRadius:20}}>{meal.time}</span>
+        </div>
+        <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>{meal.kcal} kcal · {meal.protein}g protein</div>
+      </div>
+      <div style={{display:'flex',alignItems:'center',gap:10}}>
+        <span style={{fontSize:11,color:'var(--muted)',transform:open?'rotate(180deg)':'rotate(0)',transition:'transform .2s'}}>▾</span>
+        <CheckBox checked={checked} onChange={onToggle} color="var(--accent)"/>
+      </div>
+    </div>
+    {open&&<div style={{padding:'0 16px 14px 68px',animation:'fadeUp .2s ease'}}>
+      {meal.items.map((item,i)=><div key={i} style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+        <div style={{width:5,height:5,borderRadius:'50%',background:'var(--accent)',flexShrink:0}}/><span style={{fontSize:13,color:'var(--muted)'}}>{item}</span>
+      </div>)}
+    </div>}
+  </div>);
+}
+function SupplementCard({supp,checked,onToggle,isSunday}){
+  const disabled=supp.weekly&&!isSunday;
+  return(<div style={{background:checked?`${supp.color}12`:'var(--surface)',border:`1px solid ${checked?supp.color+'44':'var(--border)'}`,borderRadius:16,padding:'14px 16px',display:'flex',alignItems:'center',gap:12,transition:'all .3s',opacity:disabled?.5:1}}>
+    <div style={{width:44,height:44,borderRadius:14,flexShrink:0,background:`${supp.color}18`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}}>{supp.icon}</div>
+    <div style={{flex:1,minWidth:0}}>
+      <div style={{fontFamily:'Syne',fontWeight:700,fontSize:14,color:supp.color}}>{supp.label}</div>
+      <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>{supp.sub}</div>
+      {disabled&&<div style={{fontSize:11,color:supp.color,marginTop:3,opacity:.8}}>Only on Sundays — {getDaysToSunday()} days to go</div>}
+    </div>
+    <CheckBox checked={checked} onChange={disabled?undefined:onToggle} color={supp.color}/>
+  </div>);
+}
+function HabitCard({habit,checked,onToggle,streak}){
+  return(<div style={{background:checked?`${habit.color}10`:'var(--surface)',border:`1px solid ${checked?habit.color+'33':'var(--border)'}`,borderRadius:16,padding:'12px 14px',display:'flex',alignItems:'center',gap:12,transition:'all .3s'}}>
+    <div style={{width:38,height:38,borderRadius:12,flexShrink:0,background:`${habit.color}18`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:17}}>{habit.icon}</div>
+    <div style={{flex:1,minWidth:0}}>
+      <div style={{fontFamily:'Syne',fontWeight:600,fontSize:13,color:checked?habit.color:'var(--text)'}}>{habit.label}</div>
+      <div style={{fontSize:11,color:'var(--muted)',marginTop:1}}>{habit.sub}</div>
+      {streak>1&&<div style={{fontSize:11,color:habit.color,marginTop:2}}>🔥 {streak} day streak</div>}
+    </div>
+    <CheckBox checked={checked} onChange={onToggle} color={habit.color}/>
+  </div>);
+}
+function WeekGrid({data}){
+  const days=[];
+  for(let i=6;i>=0;i--){const d=new Date();d.setDate(d.getDate()-i);const dk=d.toISOString().split('T')[0];
+    const dd=data[dk]||{};const pct=calcPct(dd)/100;
+    const label=['Su','Mo','Tu','We','Th','Fr','Sa'][d.getDay()];days.push({dk,pct,label,isToday:i===0});
+  }
+  return(<div style={{display:'flex',gap:6,justifyContent:'space-between'}}>
+    {days.map(day=><div key={day.dk} style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>
+      <div style={{width:'100%',aspectRatio:'1',borderRadius:8,background:day.pct>0.8?'var(--accent)':day.pct>0.5?'rgba(124,106,255,0.4)':day.pct>0?'rgba(124,106,255,0.15)':'var(--surface2)',border:day.isToday?'2px solid var(--accent)':'2px solid transparent',transition:'all .3s'}}/>
+      <span style={{fontSize:10,color:day.isToday?'var(--accent)':'var(--muted)',fontWeight:day.isToday?700:400}}>{day.label}</span>
+    </div>)}
+  </div>);
+}
+
+/* ─── EXCEL EXPORT ─── */
+function downloadExcel(username,allData){
+  const wb=XLSX.utils.book_new();
+  const summary=allData.map(r=>{const d=r.data||{};return{Date:r.date,'Completion %':calcPct(d)+'%',Calories:calcKcal(d),Protein:calcProtein(d)+'g'}});
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Summary');
+  const meals=allData.map(r=>{const d=r.data||{};const row={Date:r.date};MEALS.forEach(m=>{row[m.label]=d['meal_'+m.id]?'✓':'✗'});return row});
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(meals),'Meals');
+  const habits=allData.map(r=>{const d=r.data||{};const row={Date:r.date};HABITS.forEach(h=>{row[h.label]=d['hab_'+h.id]?'✓':'✗'});return row});
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(habits),'Habits');
+  const supps=allData.map(r=>{const d=r.data||{};const row={Date:r.date};SUPPLEMENTS.forEach(s=>{row[s.label]=d['supp_'+s.id]?'✓':'✗'});return row});
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(supps),'Supplements');
+  XLSX.writeFile(wb,username+'_health_tracker.xlsx');
+}
+
+/* ─── LOGIN SCREEN ─── */
+function LoginScreen({onLogin}){
+  const[name,setName]=useState('');
+  return(<div style={{maxWidth:420,margin:'0 auto',minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:20}}>
+    <div style={{fontSize:48,marginBottom:16}}>💪</div>
+    <h1 style={{fontFamily:'Syne',fontSize:28,fontWeight:800,marginBottom:4}}>Kani's Health Tracker</h1>
+    <p style={{color:'var(--muted)',fontSize:13,marginBottom:32}}>Evening gym · 2,600 kcal target</p>
+    <div style={{width:'100%',maxWidth:300}}>
+      <input type="text" placeholder="Enter your name to start" value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&name.trim()&&onLogin(name.trim())} style={{marginBottom:12,textAlign:'center'}}/>
+      <button onClick={()=>name.trim()&&onLogin(name.trim())} style={{width:'100%',padding:'14px',borderRadius:12,border:'none',background:'var(--accent)',color:'#fff',fontFamily:'Syne',fontSize:14,fontWeight:700,cursor:'pointer',transition:'opacity .2s'}} disabled={!name.trim()}>Start Tracking →</button>
+    </div>
+  </div>);
+}
+
+/* ─── ADMIN PANEL ─── */
+function AdminPanel(){
+  const[users,setUsers]=useState([]);const[sel,setSel]=useState(null);const[userData,setUserData]=useState([]);const[loading,setLoading]=useState(true);
+  useEffect(()=>{sbGetAllUsers().then(u=>{setUsers(u);setLoading(false)})},[]);
+  const selectUser=async(u)=>{setSel(u);const d=await sbGetUserData(u);setUserData(d)};
+  return(<div style={{display:'flex',flexDirection:'column',gap:12}}>
+    <div style={{fontFamily:'Syne',fontSize:12,color:'var(--muted)',letterSpacing:2,textTransform:'uppercase',marginBottom:4}}>Admin Panel</div>
+    {loading?<div style={{color:'var(--muted)',textAlign:'center',padding:40}}>Loading users...</div>:
+    !sel?(<div style={{display:'flex',flexDirection:'column',gap:8}}>
+      <div style={{fontFamily:'Syne',fontSize:14,fontWeight:700,marginBottom:4}}>{users.length} Registered Users</div>
+      {users.length===0&&<div style={{color:'var(--muted)',fontSize:13,padding:20,textAlign:'center',background:'var(--surface)',borderRadius:12}}>No users found. Make sure Supabase table exists.</div>}
+      {users.map(u=><button key={u} onClick={()=>selectUser(u)} style={{display:'flex',alignItems:'center',gap:12,padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,cursor:'pointer',width:'100%',textAlign:'left'}}>
+        <div style={{width:40,height:40,borderRadius:12,background:'rgba(124,106,255,0.15)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,fontFamily:'Syne',fontWeight:700,color:'var(--accent)'}}>{u[0].toUpperCase()}</div>
+        <div><div style={{fontFamily:'Syne',fontWeight:600,fontSize:14,color:'var(--text)'}}>{u}</div><div style={{fontSize:11,color:'var(--muted)'}}>Click to view data</div></div>
+      </button>)}
+    </div>):(<div>
+      <button onClick={()=>setSel(null)} style={{background:'none',border:'none',color:'var(--accent)',cursor:'pointer',fontFamily:'DM Sans',fontSize:13,marginBottom:12}}>← Back to users</button>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+        <div style={{fontFamily:'Syne',fontSize:16,fontWeight:700}}>{sel}'s Data</div>
+        <button onClick={()=>downloadExcel(sel,userData)} style={{padding:'8px 16px',borderRadius:10,border:'none',background:'var(--green)',color:'#000',fontFamily:'DM Sans',fontSize:12,fontWeight:600,cursor:'pointer'}}>📥 Download Excel</button>
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:6}}>
+        {userData.map(r=><div key={r.date} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 14px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12}}>
+          <span style={{fontSize:13,fontWeight:500}}>{r.date}</span>
+          <span style={{fontSize:12,color:calcPct(r.data||{})>70?'var(--accent3)':calcPct(r.data||{})>40?'var(--gold)':'var(--accent2)',fontFamily:'Syne',fontWeight:700}}>{calcPct(r.data||{})}%</span>
+        </div>)}
+        {userData.length===0&&<div style={{color:'var(--muted)',fontSize:13,padding:20,textAlign:'center'}}>No data yet</div>}
+      </div>
+    </div>)}
+  </div>);
+}
+
+/* ─── MAIN APP ─── */
+function App({username,onLogout}){
+  const[tab,setTab]=useState('today');
+  const[data,setData]=useState(()=>loadLocal(username));
+  const[adminMode,setAdminMode]=useState(false);
+  const[adminPw,setAdminPw]=useState('');
+  const[showAdminLogin,setShowAdminLogin]=useState(false);
+  const today=TODAY_KEY();
+  const todayData=data[today]||{};
+  const isSunday=new Date().getDay()===0;
+
+  // Load from Supabase on mount
+  useEffect(()=>{sbLoadAll(username).then(d=>{if(d){setData(prev=>{const merged={...d,...prev};saveLocal(username,merged);return merged})}});},[username]);
+
+  const toggle=useCallback((key)=>{
+    setData(prev=>{
+      const newDay={...(prev[today]||{}),[key]:!(prev[today]||{})[key]};
+      const next={...prev,[today]:newDay};
+      saveLocal(username,next);
+      sbSave(username,today,newDay);
+      return next;
+    });
+  },[today,username]);
+
+  const totalItems=MEALS.length+SUPPLEMENTS.length+HABITS.length;
+  const mealsChecked=MEALS.filter(m=>todayData['meal_'+m.id]).length;
+  const suppChecked=SUPPLEMENTS.filter(s=>todayData['supp_'+s.id]).length;
+  const habChecked=HABITS.filter(h=>todayData['hab_'+h.id]).length;
+  const totalDone=mealsChecked+suppChecked+habChecked;
+  const overallPct=Math.round(totalDone/totalItems*100);
+  const totalKcal=calcKcal(todayData);
+  const totalProtein=calcProtein(todayData);
+  const dayName=new Date().toLocaleDateString('en-IN',{weekday:'long'});
+  const dateStr=new Date().toLocaleDateString('en-IN',{day:'numeric',month:'short'});
+
+  const quotes=["Every rep counts. Every meal matters.","Fix the deficiencies. Build the body.","Vitamin D Sunday — don't forget!","Consistency beats perfection.","Evening gym hits different. 💪","Soya chunks = free muscle.","Hair grows back. Keep going."];
+  const quote=quotes[new Date().getDay()%quotes.length];
+
+  const tryAdminLogin=()=>{
+    if(adminPw===ADMIN_CREDS.pass){setAdminMode(true);setShowAdminLogin(false);setTab('admin')}
+    else{alert('Wrong password!')}
+  };
+
+  const tabs=[['today','Today'],['meals','Meals'],['supplements','Supps'],['habits','Habits'],['history','History']];
+  if(adminMode)tabs.push(['admin','Admin']);
+
+  return(
+  <div style={{maxWidth:480,margin:'0 auto',minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+    {/* Header */}
+    <div style={{padding:'24px 20px 0',animation:'fadeUp .4s ease'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:4}}>
+        <div>
+          <div style={{fontSize:12,color:'var(--muted)',letterSpacing:2,textTransform:'uppercase',fontWeight:500}}>{dayName} · {dateStr}</div>
+          <div style={{fontFamily:'Syne',fontSize:26,fontWeight:800,marginTop:2}}>Hey, {username} 👋</div>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <div style={{textAlign:'right'}}>
+            <div style={{fontFamily:'Syne',fontSize:28,fontWeight:800,color:overallPct>70?'var(--accent3)':overallPct>40?'var(--gold)':'var(--accent2)'}}>{overallPct}%</div>
+            <div style={{fontSize:11,color:'var(--muted)'}}>done</div>
+          </div>
+          {!adminMode&&<button onClick={()=>setShowAdminLogin(true)} style={{background:'none',border:'none',cursor:'pointer',fontSize:16,opacity:.4,padding:4}} title="Admin">🔒</button>}
+          <button onClick={onLogout} style={{background:'none',border:'none',cursor:'pointer',fontSize:14,opacity:.4,padding:4}} title="Logout">🚪</button>
+        </div>
+      </div>
+      <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,padding:'10px 14px',marginTop:12,marginBottom:16,borderLeft:'3px solid var(--accent)'}}>
+        <span style={{fontSize:12,color:'var(--muted)',fontStyle:'italic'}}>"{quote}"</span>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:16}}>
+        {[{label:'Calories',val:`${totalKcal}`,sub:`/ ${TARGET_KCAL}`,color:'var(--gold)'},{label:'Protein',val:`${totalProtein}g`,sub:`/ ${TARGET_PROTEIN}g`,color:'var(--accent3)'},{label:'Tasks',val:`${totalDone}/${totalItems}`,sub:'today',color:'var(--accent)'}].map((s,i)=>
+          <div key={i} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,padding:'10px 12px'}}>
+            <div style={{fontSize:10,color:'var(--muted)',marginBottom:3}}>{s.label}</div>
+            <div style={{fontFamily:'Syne',fontSize:16,fontWeight:700,color:s.color}}>{s.val}</div>
+            <div style={{fontSize:10,color:'var(--muted)',marginTop:1}}>{s.sub}</div>
+          </div>
+        )}
+      </div>
+      <div style={{height:4,background:'var(--surface2)',borderRadius:2,marginBottom:20,overflow:'hidden'}}>
+        <div style={{height:'100%',borderRadius:2,background:'linear-gradient(90deg,var(--accent),var(--accent3))',width:`${overallPct}%`,transition:'width .6s ease'}}/>
+      </div>
+      <div style={{display:'flex',gap:4,background:'var(--surface)',borderRadius:24,padding:4,marginBottom:20,border:'1px solid var(--border)',flexWrap:'wrap'}}>
+        {tabs.map(([id,label])=><TabBtn key={id} active={tab===id} onClick={()=>setTab(id)}>{label}</TabBtn>)}
+      </div>
+    </div>
+
+    {/* Admin Login Modal */}
+    {showAdminLogin&&<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:100}} onClick={()=>setShowAdminLogin(false)}>
+      <div onClick={e=>e.stopPropagation()} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:20,padding:24,width:300}}>
+        <div style={{fontFamily:'Syne',fontSize:16,fontWeight:700,marginBottom:16}}>🔒 Admin Login</div>
+        <input type="password" placeholder="Admin password" value={adminPw} onChange={e=>setAdminPw(e.target.value)} onKeyDown={e=>e.key==='Enter'&&tryAdminLogin()} style={{marginBottom:12}}/>
+        <button onClick={tryAdminLogin} style={{width:'100%',padding:12,borderRadius:12,border:'none',background:'var(--accent)',color:'#fff',fontFamily:'Syne',fontWeight:700,cursor:'pointer'}}>Login</button>
+      </div>
+    </div>}
+
+    {/* Content */}
+    <div style={{flex:1,padding:'0 20px 100px',overflowY:'auto'}}>
+      {/* TODAY */}
+      {tab==='today'&&<div style={{display:'flex',flexDirection:'column',gap:10}}>
+        <div style={{fontFamily:'Syne',fontSize:12,color:'var(--muted)',letterSpacing:2,textTransform:'uppercase',marginBottom:4}}>Quick checklist</div>
+        <div style={{fontFamily:'Syne',fontSize:11,color:'var(--accent)',letterSpacing:1,textTransform:'uppercase',marginTop:4}}>Supplements</div>
+        {SUPPLEMENTS.map(s=><SupplementCard key={s.id} supp={s} checked={!!todayData['supp_'+s.id]} onToggle={()=>toggle('supp_'+s.id)} isSunday={isSunday}/>)}
+        <div style={{fontFamily:'Syne',fontSize:11,color:'var(--accent)',letterSpacing:1,textTransform:'uppercase',marginTop:8}}>Habits</div>
+        {HABITS.map(h=><HabitCard key={h.id} habit={h} checked={!!todayData['hab_'+h.id]} onToggle={()=>toggle('hab_'+h.id)} streak={getStreak(data,'hab_'+h.id)}/>)}
+        <div style={{fontFamily:'Syne',fontSize:11,color:'var(--accent)',letterSpacing:1,textTransform:'uppercase',marginTop:8}}>Key meals</div>
+        {MEALS.slice(0,5).map(m=><MealCard key={m.id} meal={m} checked={!!todayData['meal_'+m.id]} onToggle={()=>toggle('meal_'+m.id)}/>)}
+        <button onClick={()=>setTab('meals')} style={{background:'var(--surface)',border:'1px dashed var(--border)',color:'var(--muted)',borderRadius:12,padding:'12px',fontFamily:'DM Sans',fontSize:13,cursor:'pointer',width:'100%'}}>View all {MEALS.length} meals →</button>
+
+        {/* Today's juice highlight */}
+        <div style={{background:'rgba(106,255,184,0.07)',border:'1px solid rgba(106,255,184,0.2)',borderRadius:16,padding:14,marginTop:4}}>
+          <div style={{fontFamily:'Syne',fontSize:13,fontWeight:700,color:'var(--accent3)',marginBottom:6}}>🥤 Today's Juice ({dayName})</div>
+          <div style={{fontSize:13,color:'var(--muted)'}}>{JUICE_MAP[new Date().getDay()]}</div>
+        </div>
+      </div>}
+
+      {/* MEALS */}
+      {tab==='meals'&&<div style={{display:'flex',flexDirection:'column',gap:10}}>
+        <div style={{fontFamily:'Syne',fontSize:12,color:'var(--muted)',letterSpacing:2,textTransform:'uppercase',marginBottom:4}}>{mealsChecked}/{MEALS.length} meals done</div>
+        {MEALS.map(m=><MealCard key={m.id} meal={m} checked={!!todayData['meal_'+m.id]} onToggle={()=>toggle('meal_'+m.id)}/>)}
+        <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:16,padding:16,marginTop:4}}>
+          <div style={{fontFamily:'Syne',fontSize:13,fontWeight:700,marginBottom:10}}>Day total (checked meals)</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            <div style={{background:'var(--surface2)',borderRadius:10,padding:'10px 12px'}}>
+              <div style={{fontSize:10,color:'var(--muted)'}}>Calories</div>
+              <div style={{fontFamily:'Syne',fontSize:18,fontWeight:700,color:'var(--gold)'}}>{totalKcal}</div>
+              <div style={{fontSize:10,color:'var(--muted)'}}>/ {TARGET_KCAL} target</div>
+            </div>
+            <div style={{background:'var(--surface2)',borderRadius:10,padding:'10px 12px'}}>
+              <div style={{fontSize:10,color:'var(--muted)'}}>Protein</div>
+              <div style={{fontFamily:'Syne',fontSize:18,fontWeight:700,color:'var(--accent3)'}}>{totalProtein}g</div>
+              <div style={{fontSize:10,color:'var(--muted)'}}>/ {TARGET_PROTEIN}g target</div>
+            </div>
+          </div>
+          <div style={{marginTop:10}}>
+            <div style={{fontSize:11,color:'var(--muted)',marginBottom:4}}>Calorie progress</div>
+            <div style={{height:6,background:'var(--surface2)',borderRadius:3,overflow:'hidden'}}>
+              <div style={{height:'100%',borderRadius:3,background:'linear-gradient(90deg,var(--gold),var(--accent3))',width:`${Math.min(100,totalKcal/TARGET_KCAL*100)}%`,transition:'width .5s ease'}}/>
+            </div>
+          </div>
+        </div>
+        {/* Weekly juice plan */}
+        <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:16,padding:16}}>
+          <div style={{fontFamily:'Syne',fontSize:13,fontWeight:700,marginBottom:10}}>🥤 Weekly Juice Plan (4 PM)</div>
+          {JUICE_DAY.map((day,i)=><div key={i} style={{display:'flex',gap:10,marginBottom:6,opacity:new Date().getDay()===i?1:.5}}>
+            <span style={{fontSize:12,fontWeight:600,color:new Date().getDay()===i?'var(--accent3)':'var(--muted)',width:30,flexShrink:0}}>{day.slice(0,3)}</span>
+            <span style={{fontSize:12,color:'var(--muted)'}}>{JUICE_MAP[i]}</span>
+            {new Date().getDay()===i&&<span style={{fontSize:10,background:'var(--accent3)',color:'#000',padding:'1px 6px',borderRadius:8,fontWeight:600}}>TODAY</span>}
+          </div>)}
+        </div>
+      </div>}
+
+      {/* SUPPLEMENTS */}
+      {tab==='supplements'&&<div style={{display:'flex',flexDirection:'column',gap:10}}>
+        <div style={{fontFamily:'Syne',fontSize:12,color:'var(--muted)',letterSpacing:2,textTransform:'uppercase',marginBottom:4}}>Your supplement protocol</div>
+        {SUPPLEMENTS.map(s=><SupplementCard key={s.id} supp={s} checked={!!todayData['supp_'+s.id]} onToggle={()=>toggle('supp_'+s.id)} isSunday={isSunday}/>)}
+        <div style={{background:'rgba(74,222,128,0.07)',border:'1px solid rgba(74,222,128,0.2)',borderRadius:16,padding:14,marginTop:4}}>
+          <div style={{fontFamily:'Syne',fontSize:13,fontWeight:700,color:'var(--green)',marginBottom:6}}>100% Safe — no side effects</div>
+          <div style={{fontSize:12,color:'var(--muted)',lineHeight:1.6}}>These are vitamins your body is deficient in based on your blood report. Millions take this exact protocol prescribed by doctors.</div>
+        </div>
+      </div>}
+
+      {/* HABITS */}
+      {tab==='habits'&&<div style={{display:'flex',flexDirection:'column',gap:10}}>
+        <div style={{fontFamily:'Syne',fontSize:12,color:'var(--muted)',letterSpacing:2,textTransform:'uppercase',marginBottom:4}}>Daily habits tracker</div>
+        {HABITS.map(h=><HabitCard key={h.id} habit={h} checked={!!todayData['hab_'+h.id]} onToggle={()=>toggle('hab_'+h.id)} streak={getStreak(data,'hab_'+h.id)}/>)}
+      </div>}
+
+      {/* HISTORY */}
+      {tab==='history'&&<div style={{display:'flex',flexDirection:'column',gap:12}}>
+        <div style={{fontFamily:'Syne',fontSize:12,color:'var(--muted)',letterSpacing:2,textTransform:'uppercase',marginBottom:4}}>Last 7 days</div>
+        <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:16,padding:16}}>
+          <div style={{fontFamily:'Syne',fontSize:13,fontWeight:700,marginBottom:12}}>Completion heatmap</div>
+          <WeekGrid data={data}/>
+        </div>
+        <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:16,padding:16}}>
+          <div style={{fontFamily:'Syne',fontSize:13,fontWeight:700,marginBottom:12}}>Your health targets</div>
+          {[{label:'Vitamin D',current:'18.8 ng/mL',target:'30+',color:'#ffd166',progress:62},
+            {label:'Vitamin B12',current:'215 pg/mL',target:'400+',color:'#6affb8',progress:54},
+            {label:'Body weight',current:'59 kg',target:'65+ kg',color:'#7c6aff',progress:91},
+            {label:'Calorie intake',current:`${totalKcal} kcal`,target:`${TARGET_KCAL}`,color:'#ff6a6a',progress:Math.round(totalKcal/TARGET_KCAL*100)}
+          ].map((g,i)=><div key={i} style={{marginBottom:12}}>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
+              <span style={{fontSize:12,fontWeight:500}}>{g.label}</span>
+              <span style={{fontSize:11,color:'var(--muted)'}}>{g.current} → {g.target}</span>
+            </div>
+            <div style={{height:6,background:'var(--surface2)',borderRadius:3,overflow:'hidden'}}>
+              <div style={{height:'100%',borderRadius:3,background:g.color,width:`${Math.min(100,g.progress)}%`,transition:'width .5s ease'}}/>
+            </div>
+          </div>)}
+        </div>
+      </div>}
+
+      {/* ADMIN */}
+      {tab==='admin'&&adminMode&&<AdminPanel/>}
+    </div>
+
+    {/* Bottom nav */}
+    <div style={{position:'fixed',bottom:0,left:'50%',transform:'translateX(-50%)',width:'100%',maxWidth:480,background:'rgba(10,10,15,0.95)',backdropFilter:'blur(20px)',borderTop:'1px solid var(--border)',padding:'12px 20px 20px',display:'flex',justifyContent:'space-around'}}>
+      {[{id:'today',icon:'⚡',label:'Today'},{id:'meals',icon:'🍽️',label:'Meals'},{id:'supplements',icon:'💊',label:'Supps'},{id:'habits',icon:'✅',label:'Habits'},{id:'history',icon:'📊',label:'History'}].concat(adminMode?[{id:'admin',icon:'👑',label:'Admin'}]:[]).map(nav=>
+        <button key={nav.id} onClick={()=>setTab(nav.id)} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:3,background:'none',border:'none',cursor:'pointer',padding:'6px 8px',borderRadius:12,transition:'all .2s',opacity:tab===nav.id?1:.5}}>
+          <span style={{fontSize:18}}>{nav.icon}</span>
+          <span style={{fontSize:10,fontFamily:'DM Sans',fontWeight:500,color:tab===nav.id?'var(--accent)':'var(--muted)'}}>{nav.label}</span>
+          {tab===nav.id&&<div style={{width:4,height:4,borderRadius:'50%',background:'var(--accent)'}}/>}
+        </button>
+      )}
+    </div>
+  </div>);
+}
+
+/* ─── APP WRAPPER ─── */
+function AppWrapper(){
+  const[username,setUsername]=useState(()=>localStorage.getItem('kani_health_user')||'');
+  const login=(name)=>{localStorage.setItem('kani_health_user',name);setUsername(name)};
+  const logout=()=>{localStorage.removeItem('kani_health_user');setUsername('')};
+  if(!username)return <LoginScreen onLogin={login}/>;
+  return <App username={username} onLogout={logout}/>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<AppWrapper/>);
+
+</script>
+</body>
+</html>
